@@ -1,0 +1,115 @@
+
+.PHONY: clean
+
+ANDROID_PATH = $(CURDIR)/android
+ANDROID_SIGN_FILE_PATH = $(ANDROID_PATH)/app/new-debug.keystore
+ANDROID_OUTPUT_PATH = $(CURDIR)/build/android
+
+IOS_PATH = $(CURDIR)/ios
+IOS_OUTPUT_PATH = $(CURDIR)/build/ios
+IOS_ARCHIVE_PATH = $(IOS_OUTPUT_PATH)/project.xcarchive
+IOS_SCHEME?=FTLifeClientTellingApp
+IOS_EXPORT_NAME=release
+IOS_EXPORT_OPTIONS_FILE=
+
+# sit / uat
+ENV = uat
+ENV_UPPERCASE := $(shell echo $(ENV) | awk '{print toupper(substr($$0,1,1))tolower(substr($$0,2))}')
+
+ifeq ($(ENV),)
+	include .env
+else
+	include .env.$(ENV)
+endif
+
+print_env:
+	@echo "ENV is $(ENV)"
+
+# IOS 不同环境使用不同导出配置文件
+ifeq ($(IOS_SCHEME),FTLifeClientTellingApp)
+    IOS_EXPORT_OPTIONS_FILE = ExportOptions.plist
+else
+    IOS_EXPORT_OPTIONS_FILE = ExportOptionsUAT.plist
+endif
+
+RUNNING_PORT := $(shell lsof -t -i:8088)
+
+appAndroidName = $(APPCENTER_ANDROID_PATH)
+appIOSName = $(APPCENTER_IOS_PATH)
+group = insider
+releaseNote = 1、修复新生意进度，选择条件之后，清除按钮没有高粱问题；
+
+# 新增的变量，用于指定要推送的版本号
+TARGET_VERSION = 1.1.35
+
+# appAndroidName="ruswong-deloitte.com.hk/Clientel-SIT-ANDROID"
+# appIOSName="ruswong-deloitte.com.hk/Clientel-SIT-IOS"
+# group = insider
+# releaseNote = 
+
+all: install version ios-build android-build
+
+install:
+	yarn install
+
+version:
+	npm version patch --no-git-tag-version
+
+ios-build:
+	# 保证 8088 端口可使用, 防止因为端口占用打包失败
+	if [ "$(RUNNING_PORT)" != "" ]; then kill $(RUNNING_PORT);fi;
+
+	# 同步版本号
+	npx react-native-version -B --target ios
+
+	# 更新依赖
+	cd $(IOS_PATH) && pod install
+
+	# 生成 archive 文件
+	rm -rf $(IOS_OUTPUT_PATH)
+	xcodebuild archive -workspace $(IOS_PATH)/FTLifeClientTellingApp.xcworkspace -scheme $(IOS_SCHEME) -archivePath $(IOS_ARCHIVE_PATH)
+
+	@make ios-build-export
+
+ios-build-export:
+	# 导出 ipa
+	xcodebuild -exportArchive -archivePath $(IOS_ARCHIVE_PATH) -exportPath $(IOS_OUTPUT_PATH) -exportOptionsPlist $(IOS_PATH)/FTLifeClientTellingApp/$(IOS_EXPORT_OPTIONS_FILE)
+
+android-build:
+	npx react-native-version -B --target android
+
+	cd $(ANDROID_PATH) && ./gradlew clean && ./gradlew assemble$(ENV_UPPERCASE)Release -Pandroid.injected.signing.store.file=$(ANDROID_SIGN_FILE_PATH) -Pandroid.injected.signing.store.password=deloitte -Pandroid.injected.signing.key.alias=deloitte-clientel -Pandroid.injected.signing.key.password=deloitte
+
+	rm -rf $(ANDROID_OUTPUT_PATH)
+	mkdir -p $(ANDROID_OUTPUT_PATH)
+	cp $(ANDROID_PATH)/app/build/outputs/apk$(if $(ENV),/$(ENV),'')/release/*.apk $(ANDROID_OUTPUT_PATH)/
+
+codepush: codepush-ios codepush-android
+
+upload-android:
+	appcenter distribute release -a $(appAndroidName) -f $(ANDROID_OUTPUT_PATH)/*.apk -g $(group) -r $(releaseNote)
+
+upload-ios:
+	appcenter distribute release -a $(appIOSName) -f $(IOS_OUTPUT_PATH)/*.ipa -g $(group) -r $(releaseNote)
+
+upload-all: upload-android upload-ios
+	
+codepush-version-all: codepush-ios-version codepush-android-version
+codepush-version-all-immediately: codepush-ios-immediately codepush-android-immediately
+
+# 需要 appcenter 手动打开生效
+codepush-ios-version:
+	appcenter codepush release-react -a ${appIOSName} -d Production -p $(IOS_PATH)/FTLifeClientTellingApp/Info.plist -m -x --target-binary-version $(TARGET_VERSION)
+
+codepush-android-version:
+	appcenter codepush release-react -a ${appAndroidName} -d Production -m -x  --target-binary-version $(TARGET_VERSION)
+
+# 立即生效
+codepush-ios-immediately:
+	appcenter codepush release-react -a ${appIOSName} -d Production -p $(IOS_PATH)/FTLifeClientTellingApp/Info.plist -m --target-binary-version $(TARGET_VERSION)
+
+codepush-android-immediately:
+	appcenter codepush release-react -a ${appAndroidName} -d Production -m --target-binary-version $(TARGET_VERSION)
+
+clean:
+	rm -rf $(CURDIR)/build
